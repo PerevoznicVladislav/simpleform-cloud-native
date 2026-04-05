@@ -34,13 +34,17 @@ jobs:
         with:
           project_id: ${{ secrets.GCP_PROJECT }}
 
+      - name: Prepare Artifact Registry host
+        id: artifact-host
+        run: echo "host=${{ secrets.GCP_REGION }}-docker.pkg.dev" >> "$GITHUB_OUTPUT"
+
       - name: Configure Docker for Artifact Registry
-        run: gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev --quiet
+        run: gcloud auth configure-docker "${{ steps.artifact-host.outputs.host }}" --quiet
 
       - name: Build and push backend image
         id: build-backend
         run: |
-          BACKEND_IMAGE="${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT }}/${{ env.ARTIFACT_REPOSITORY }}/${{ env.BACKEND_SERVICE }}:${{ github.sha }}"
+          BACKEND_IMAGE="${{ steps.artifact-host.outputs.host }}/${{ secrets.GCP_PROJECT }}/${{ env.ARTIFACT_REPOSITORY }}/${{ env.BACKEND_SERVICE }}:${{ github.sha }}"
           docker build -f backend/Dockerfile -t "$BACKEND_IMAGE" backend
           docker push "$BACKEND_IMAGE"
           echo "image=$BACKEND_IMAGE" >> "$GITHUB_OUTPUT"
@@ -58,12 +62,11 @@ jobs:
             MongoDbSettings__ConnectionString=${{ secrets.MONGO_CONNECTION_STRING }}
             MongoDbSettings__DatabaseName=SimpleFormDb
             MongoDbSettings__CollectionName=Submissions
-            AllowedOrigins=${{ secrets.ALLOWED_ORIGINS }}
 
       - name: Build and push frontend image
         id: build-frontend
         run: |
-          FRONTEND_IMAGE="${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT }}/${{ env.ARTIFACT_REPOSITORY }}/${{ env.FRONTEND_SERVICE }}:${{ github.sha }}"
+          FRONTEND_IMAGE="${{ steps.artifact-host.outputs.host }}/${{ secrets.GCP_PROJECT }}/${{ env.ARTIFACT_REPOSITORY }}/${{ env.FRONTEND_SERVICE }}:${{ github.sha }}"
           docker build -f frontend/Dockerfile -t "$FRONTEND_IMAGE" frontend
           docker push "$FRONTEND_IMAGE"
           echo "image=$FRONTEND_IMAGE" >> "$GITHUB_OUTPUT"
@@ -78,6 +81,20 @@ jobs:
           flags: --allow-unauthenticated --port=80
           env_vars: |
             API_BASE_URL=${{ steps.deploy-backend.outputs.url }}/api
+
+      - name: Update backend allowed origins
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ env.BACKEND_SERVICE }}
+          region: ${{ secrets.GCP_REGION }}
+          image: ${{ steps.build-backend.outputs.image }}
+          flags: --allow-unauthenticated --port=8080
+          env_vars: |
+            ASPNETCORE_URLS=http://0.0.0.0:8080
+            MongoDbSettings__ConnectionString=${{ secrets.MONGO_CONNECTION_STRING }}
+            MongoDbSettings__DatabaseName=SimpleFormDb
+            MongoDbSettings__CollectionName=Submissions
+            AllowedOrigins=${{ steps.deploy-frontend.outputs.url }}
 
       - name: Show deployed URLs
         run: |
