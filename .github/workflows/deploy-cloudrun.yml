@@ -1,0 +1,82 @@
+﻿name: Build and Deploy to Cloud Run
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+env:
+  ARTIFACT_REPOSITORY: simpleform
+  BACKEND_SERVICE: simpleform-backend
+  FRONTEND_SERVICE: simpleform-frontend
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT }}
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ secrets.GCP_REGION }}-docker.pkg.dev --quiet
+
+      - name: Build and push backend image
+        id: build-backend
+        run: |
+          BACKEND_IMAGE="${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT }}/${{ env.ARTIFACT_REPOSITORY }}/${{ env.BACKEND_SERVICE }}:${{ github.sha }}"
+          docker build -f backend/Dockerfile -t "$BACKEND_IMAGE" backend
+          docker push "$BACKEND_IMAGE"
+          echo "image=$BACKEND_IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy backend to Cloud Run
+        id: deploy-backend
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ env.BACKEND_SERVICE }}
+          region: ${{ secrets.GCP_REGION }}
+          image: ${{ steps.build-backend.outputs.image }}
+          flags: --allow-unauthenticated --port=8080
+          env_vars: |
+            ASPNETCORE_URLS=http://0.0.0.0:8080
+            MongoDbSettings__ConnectionString=${{ secrets.MONGO_CONNECTION_STRING }}
+            MongoDbSettings__DatabaseName=SimpleFormDb
+            MongoDbSettings__CollectionName=Submissions
+            AllowedOrigins=${{ secrets.ALLOWED_ORIGINS }}
+
+      - name: Build and push frontend image
+        id: build-frontend
+        run: |
+          FRONTEND_IMAGE="${{ secrets.GCP_REGION }}-docker.pkg.dev/${{ secrets.GCP_PROJECT }}/${{ env.ARTIFACT_REPOSITORY }}/${{ env.FRONTEND_SERVICE }}:${{ github.sha }}"
+          docker build -f frontend/Dockerfile -t "$FRONTEND_IMAGE" frontend
+          docker push "$FRONTEND_IMAGE"
+          echo "image=$FRONTEND_IMAGE" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy frontend to Cloud Run
+        id: deploy-frontend
+        uses: google-github-actions/deploy-cloudrun@v2
+        with:
+          service: ${{ env.FRONTEND_SERVICE }}
+          region: ${{ secrets.GCP_REGION }}
+          image: ${{ steps.build-frontend.outputs.image }}
+          flags: --allow-unauthenticated --port=80
+          env_vars: |
+            API_BASE_URL=${{ steps.deploy-backend.outputs.url }}/api
+
+      - name: Show deployed URLs
+        run: |
+          echo "Backend URL: ${{ steps.deploy-backend.outputs.url }}"
+          echo "Frontend URL: ${{ steps.deploy-frontend.outputs.url }}"
